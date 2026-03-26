@@ -1,0 +1,19 @@
+{
+  "name": "discord-bug-bot",
+  "version": "1.0.0",
+  "description": "Discord bot that reports bugs and tasks to ClickUp using Claude AI",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.21.0",
+    "axios": "^1.7.9",
+    "discord.js": "^14.17.3",
+    "dotenv": "^16.4.7"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
