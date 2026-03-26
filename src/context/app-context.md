@@ -56,6 +56,16 @@ Form for reporting that someone is performing construction or improvements witho
 - Has the same view as Admin
 - Read-only access: cannot modify, manage, or change the status of anything
 
+#### Historical Data (Admin only)
+- Allows Admin to manually enter permits that were created before the application existed (legacy permits)
+- Uses the same form as the Applicant permit form, but with fewer required fields
+- Contains an additional feature: PDF upload of a manually filled legacy form (scanned document)
+- The platform uses AI to parse the scanned PDF and map its data to the current application form fields automatically
+- Important context for bug reporting: a "Permit" can originate from two sources:
+  1. Created by an Applicant through the normal multi-step form
+  2. Created by Admin through Historical Data (manually or via PDF scan)
+- Bugs in this module may involve: form validation differences vs Applicant form, AI field mapping errors from PDF, or missing data from legacy records
+
 ---
 
 ## Key modules summary
@@ -69,6 +79,7 @@ Form for reporting that someone is performing construction or improvements witho
 | Complaints (private) | Admin / Agency | Management and review of reported complaints |
 | Inspection module | Admin / Inspector | Field inspection management, online and offline via PWA |
 | Agency view | Agency | Read-only view of Admin dashboard |
+| Historical Data | Admin | Manual entry and PDF scan of legacy permits created before the platform existed |
 
 ---
 
