@@ -37,6 +37,7 @@ Discord bot that lets your team report bugs and tasks directly from a Discord ch
 1. Go to https://app.clickup.com/settings/apps → **API Token** → Generate a token → this is your `CLICKUP_API_TOKEN`
 2. Your Workspace ID is in the URL when you open ClickUp: `https://app.clickup.com/{WORKSPACE_ID}/...`
 3. `CLICKUP_SPACE_ID` is the ID of the Space where task creation is allowed (currently locked to Space `90140175053`)
+4. `CLICKUP_QA_LIST_ID` is the ID of the ClickUp list where `/testcase` creates Test Plans and Test Cases (required at startup — same value as in production, e.g. `901413246506`)
 
 ### 4. Get a Gemini API key
 
@@ -57,6 +58,7 @@ DISCORD_CLIENT_ID=your_discord_application_id
 CLICKUP_API_TOKEN=your_clickup_personal_api_token
 CLICKUP_WORKSPACE_ID=your_clickup_workspace_id
 CLICKUP_SPACE_ID=90140175053
+CLICKUP_QA_LIST_ID=901413246506
 GEMINI_API_KEY=your_gemini_api_key
 ```
 

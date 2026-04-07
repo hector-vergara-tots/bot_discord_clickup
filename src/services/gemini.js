@@ -42,14 +42,16 @@ function parseGeminiResponse(rawText) {
  * @param {{ taskId: string, tipo: string, ambiente: string, descripcion: string }} params
  * @returns {Promise<Object>} Parsed JSON report
  */
-async function generateBugReport({ taskId, tipo, ambiente, descripcion }) {
+async function generateBugReport({ taskId = null, tipo, ambiente, descripcion }) {
   const templateId = TASK_TYPES[tipo.toLowerCase()] ?? 0;
   const template = templates[templateId] ?? templates[0];
 
-  const userMessage = `Task ID: ${taskId}
-Type: ${tipo}
-Environment: ${ambiente}
-Description: ${descripcion}`;
+  const userMessage = [
+    taskId ? `Task ID: ${taskId}` : null,
+    `Type: ${tipo}`,
+    `Environment: ${ambiente}`,
+    `Description: ${descripcion}`,
+  ].filter(Boolean).join('\n');
 
   let lastError;
   for (const modelName of MODELS) {

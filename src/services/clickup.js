@@ -69,9 +69,11 @@ const ENVIRONMENT_OPTIONS = {
 const ENVIRONMENT_FIELD_ID = '831a2fc4-e6c7-4aee-89a4-8f58dabfa28a';
 
 /**
- * Creates a subtask under a parent task in ClickUp.
+ * Creates a task (or subtask) in ClickUp.
+ * When parentTaskId is provided the task is created as a child of that task.
+ * When parentTaskId is null/undefined the task is created directly in the list (e.g. a sprint).
  * @param {Object} params
- * @param {string} params.parentTaskId - The ClickUp task ID of the parent
+ * @param {string|null} params.parentTaskId - Parent task ID, or null to create at list level
  * @param {string} params.listId - The list ID where the task lives
  * @param {string} params.tipo - bug | improvement | task | etc.
  * @param {string} params.ambiente - staging | production | development
@@ -79,7 +81,7 @@ const ENVIRONMENT_FIELD_ID = '831a2fc4-e6c7-4aee-89a4-8f58dabfa28a';
  * @param {Object} params.report - Structured report from Gemini
  * @returns {Promise<Object>} Created task object
  */
-async function createSubtask({ parentTaskId, listId, tipo, ambiente, assigneeId, report }) {
+async function createSubtask({ parentTaskId = null, listId, tipo, ambiente, assigneeId, report }) {
   const description = report.description;
   const environmentOptionId = ENVIRONMENT_OPTIONS[ambiente.toLowerCase()];
 
@@ -87,7 +89,6 @@ async function createSubtask({ parentTaskId, listId, tipo, ambiente, assigneeId,
     name: report.title,
     content: description,
     markdown_content: description,
-    parent: parentTaskId,
     custom_item_id: TASK_TYPES[tipo.toLowerCase()] ?? 0,
     tags: [tipo],
     priority: impactToPriority(report.impact),
@@ -99,12 +100,79 @@ async function createSubtask({ parentTaskId, listId, tipo, ambiente, assigneeId,
     ],
   };
 
-  if (assigneeId) {
-    payload.assignees = [assigneeId];
-  }
+  if (parentTaskId) payload.parent = parentTaskId;
+  if (assigneeId)   payload.assignees = [assigneeId];
 
   const { data } = await http.post(`/list/${listId}/task`, payload);
   return data;
+}
+
+/**
+ * Parses a sprint date range from its name, e.g. "Sprint 37 (3/25 - 4/14)".
+ * Uses the current calendar year; handles December→January year wraps.
+ * @param {string} name - Sprint list name
+ * @returns {{ start: Date, end: Date } | null}
+ */
+function parseSprintDates(name) {
+  const match = name.match(/\((\d{1,2})\/(\d{1,2})\s*-\s*(\d{1,2})\/(\d{1,2})\)/);
+  if (!match) return null;
+
+  const year = new Date().getFullYear();
+  const [, sm, sd, em, ed] = match.map(Number);
+
+  const start = new Date(year, sm - 1, sd, 0,  0,  0);
+  const end   = new Date(year, em - 1, ed, 23, 59, 59);
+
+  // Handle year wrap (e.g. sprint spanning Dec → Jan)
+  if (end < start) end.setFullYear(year + 1);
+
+  return { start, end };
+}
+
+/**
+ * Returns the active sprint list by scanning all folders in the ClickUp space
+ * whose names contain "Sprint". Detects the active sprint by matching today's
+ * date against each sprint list's date range (parsed from names like
+ * "Sprint N (M/D - M/D)"). No env var needed — fully automatic.
+ *
+ * Resolution order:
+ *   1. First sprint list whose date range contains today
+ *   2. If no date match: the last list across all sprint folders (most recent sprint)
+ *
+ * @returns {Promise<Object|null>} ClickUp list object representing the active sprint
+ */
+async function getCurrentSprint() {
+  const spaceId = process.env.CLICKUP_SPACE_ID;
+
+  // Fetch all folders in the space (not archived)
+  const { data: folderData } = await http.get(`/space/${spaceId}/folder`, { params: { archived: false } });
+  const sprintFolders = folderData.folders.filter((f) =>
+    f.name.toLowerCase().includes('sprint')
+  );
+
+  if (!sprintFolders.length) return null;
+
+  // Collect all sprint lists across every sprint folder
+  const allLists = [];
+  for (const folder of sprintFolders) {
+    const { data: listData } = await http.get(`/folder/${folder.id}/list`, { params: { archived: false } });
+    allLists.push(...listData.lists);
+  }
+
+  if (!allLists.length) return null;
+
+  const today = new Date();
+
+  // Return the first list whose date range contains today
+  for (const list of allLists) {
+    const dates = parseSprintDates(list.name);
+    if (dates && today >= dates.start && today <= dates.end) {
+      return list;
+    }
+  }
+
+  // Fallback: last list in the collection (most recent sprint)
+  return allLists.at(-1);
 }
 
 /**
@@ -191,4 +259,4 @@ async function linkTasks(taskId, linkedTaskId) {
   return data;
 }
 
-module.exports = { getWorkspaceMembers, getTask, createSubtask, getTasksInList, createTestPlan, createTestCase, linkTasks };
+module.exports = { getWorkspaceMembers, getTask, createSubtask, getCurrentSprint, getTasksInList, createTestPlan, createTestCase, linkTasks };

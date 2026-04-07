@@ -1,7 +1,7 @@
 {
   "name": "discord-bug-bot",
   "version": "1.0.0",
-  "description": "Discord bot that reports bugs and tasks to ClickUp using Claude AI",
+  "description": "Discord bot that reports bugs and tasks to ClickUp using Gemini AI",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",

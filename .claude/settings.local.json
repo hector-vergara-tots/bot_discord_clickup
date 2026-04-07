@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__claude_ai_ClickUp__clickup_get_workspace_hierarchy"
+    ]
+  }
+}
