@@ -52,12 +52,22 @@ async function registerCommands() {
   const commands = [...client.commands.values()].map((cmd) => cmd.data.toJSON());
 
   try {
-    logger.info(`[startup] Registering ${commands.length} slash command(s)...`);
-    await rest.put(
-      Routes.applicationCommands(process.env.DISCORD_CLIENT_ID),
-      { body: commands }
-    );
-    logger.info('[startup] Slash commands registered globally.');
+    const guildId = process.env.GUILD_ID;
+    if (guildId) {
+      logger.info(`[startup] Registering ${commands.length} slash command(s) in guild ${guildId}...`);
+      await rest.put(
+        Routes.applicationGuildCommands(process.env.DISCORD_CLIENT_ID, guildId),
+        { body: commands }
+      );
+      logger.info('[startup] Slash commands registered for guild (instant).');
+    } else {
+      logger.info(`[startup] Registering ${commands.length} slash command(s) globally...`);
+      await rest.put(
+        Routes.applicationCommands(process.env.DISCORD_CLIENT_ID),
+        { body: commands }
+      );
+      logger.info('[startup] Slash commands registered globally.');
+    }
   } catch (err) {
     logger.error('[startup] Failed to register slash commands:', err);
     process.exit(1);
