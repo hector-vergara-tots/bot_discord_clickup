@@ -6,21 +6,37 @@ const bugCommand = require('./commands/bug');
 const testcaseCommand = require('./commands/testcase');
 
 // ── Validate required env vars ──────────────────────────────────────────────
-const REQUIRED_ENV = [
+const AI_PROVIDER = (process.env.AI_PROVIDER || 'gemini').toLowerCase();
+
+const VALID_PROVIDERS = ['gemini', 'claude'];
+if (!VALID_PROVIDERS.includes(AI_PROVIDER)) {
+  logger.error(`[startup] Invalid AI_PROVIDER: "${AI_PROVIDER}". Valid values: ${VALID_PROVIDERS.join(', ')}`);
+  process.exit(1);
+}
+
+const BASE_ENV = [
   'DISCORD_TOKEN',
   'DISCORD_CLIENT_ID',
   'CLICKUP_API_TOKEN',
   'CLICKUP_WORKSPACE_ID',
   'CLICKUP_SPACE_ID',
   'CLICKUP_QA_LIST_ID',
-  'GEMINI_API_KEY',
 ];
+
+const PROVIDER_ENV = {
+  gemini: ['GEMINI_API_KEY'],
+  claude: ['ANTHROPIC_API_KEY'],
+};
+
+const REQUIRED_ENV = [...BASE_ENV, ...PROVIDER_ENV[AI_PROVIDER]];
 
 const missing = REQUIRED_ENV.filter((key) => !process.env[key]);
 if (missing.length) {
   logger.error(`[startup] Missing required environment variables: ${missing.join(', ')}`);
   process.exit(1);
 }
+
+logger.info(`[startup] AI provider: ${AI_PROVIDER}`);
 
 // ── Discord client ───────────────────────────────────────────────────────────
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });

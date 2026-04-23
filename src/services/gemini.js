@@ -42,7 +42,7 @@ function parseGeminiResponse(rawText) {
  * @param {{ taskId: string, tipo: string, ambiente: string, descripcion: string }} params
  * @returns {Promise<Object>} Parsed JSON report
  */
-async function generateBugReport({ taskId = null, tipo, ambiente, descripcion }) {
+async function generateBugReport({ taskId = null, tipo, ambiente, descripcion, useContext = true, previousReport = null, adjustment = null }) {
   const templateId = TASK_TYPES[tipo.toLowerCase()] ?? 0;
   const template = templates[templateId] ?? templates[0];
 
@@ -51,12 +51,16 @@ async function generateBugReport({ taskId = null, tipo, ambiente, descripcion })
     `Type: ${tipo}`,
     `Environment: ${ambiente}`,
     `Description: ${descripcion}`,
+    previousReport ? `\n## Previously Generated Report\n${JSON.stringify(previousReport, null, 2)}` : null,
+    adjustment ? `\n## User Adjustment Request\n${adjustment}\n\nUpdate the report based on this feedback. Keep everything else intact.` : null,
   ].filter(Boolean).join('\n');
 
   let lastError;
   for (const modelName of MODELS) {
     try {
-      const fullSystemPrompt = `## Application Context\n${appContext}\n\n---\n\n## Your Task\n${template.systemPrompt}`;
+      const fullSystemPrompt = useContext
+        ? `## Application Context\n${appContext}\n\n---\n\n## Your Task\n${template.systemPrompt}`
+        : `## Your Task\n${template.systemPrompt}`;
 
       const model = genAI.getGenerativeModel({
         model: modelName,
@@ -80,13 +84,18 @@ async function generateBugReport({ taskId = null, tipo, ambiente, descripcion })
  * @param {{ huName: string, huDescription: string, ambiente: string }} params
  * @returns {Promise<Object>}
  */
-async function generateTestCases({ huName, huDescription, ambiente }) {
-  const fullSystemPrompt = `## Application Context\n${appContext}\n\n---\n\n## Your Task\n${testCaseTemplate.systemPromptFromHU}`;
+async function generateTestCases({ huName, huDescription, ambiente, useContext = true, previousReport = null, adjustment = null }) {
+  const fullSystemPrompt = useContext
+    ? `## Application Context\n${appContext}\n\n---\n\n## Your Task\n${testCaseTemplate.systemPromptFromHU}`
+    : `## Your Task\n${testCaseTemplate.systemPromptFromHU}`;
 
-  const userMessage = `User Story: ${huName}
-Environment: ${ambiente}
-Description:
-${huDescription}`;
+  const userMessage = [
+    `User Story: ${huName}`,
+    `Environment: ${ambiente}`,
+    `Description:\n${huDescription}`,
+    previousReport ? `\n## Previously Generated Test Cases\n${JSON.stringify(previousReport, null, 2)}` : null,
+    adjustment ? `\n## User Adjustment Request\n${adjustment}\n\nUpdate the test cases based on this feedback. Keep everything else intact.` : null,
+  ].filter(Boolean).join('\n');
 
   let lastError;
   for (const modelName of MODELS) {

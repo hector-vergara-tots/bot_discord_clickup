@@ -5,13 +5,17 @@ const {
   ButtonStyle,
   StringSelectMenuBuilder,
   EmbedBuilder,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
 } = require('discord.js');
-const { generateTestCases } = require('../services/gemini');
+const { generateTestCases } = require('../services/ai');
 const { getTask, getTasksInList, createTestPlan, createTestCase, linkTasks } = require('../services/clickup');
 const logger = require('../utils/logger');
 
 const MIN_HU_CONTENT_LENGTH = 50;
 const COLLECTOR_TIMEOUT_MS = 60_000;
+const PREVIEW_TIMEOUT_MS = 120_000;
 
 const command = new SlashCommandBuilder()
   .setName('testcase')
@@ -32,13 +36,20 @@ const command = new SlashCommandBuilder()
         { name: '🧪 Staging', value: 'staging' },
         { name: '🚀 Production', value: 'production' }
       )
+  )
+  .addBooleanOption((opt) =>
+    opt
+      .setName('contexto_app')
+      .setDescription('Usar contexto de la aplicación (desactivar para features nuevas no documentadas)')
+      .setRequired(false)
   );
 
 async function execute(interaction) {
   await interaction.deferReply();
 
-  const huId = interaction.options.getString('hu_id').trim();
-  const ambiente = interaction.options.getString('ambiente');
+  const huId       = interaction.options.getString('hu_id').trim();
+  const ambiente   = interaction.options.getString('ambiente');
+  const useContext = interaction.options.getBoolean('contexto_app') ?? true;
 
   // ── Step 1: Fetch HU ───────────────────────────────────────────────────────
   await interaction.editReply('⏳ Obteniendo HU de ClickUp...');
@@ -67,7 +78,7 @@ async function execute(interaction) {
   await interaction.editReply('🤖 Generando test cases con Gemini...');
   let tcResult;
   try {
-    tcResult = await generateTestCases({ huName: huTask.name, huDescription: huContent, ambiente });
+    tcResult = await generateTestCases({ huName: huTask.name, huDescription: huContent, ambiente, useContext });
   } catch (err) {
     return interaction.editReply(`❌ Error al generar test cases con Gemini: ${err.message}`);
   }
@@ -76,7 +87,12 @@ async function execute(interaction) {
     return interaction.editReply('❌ Gemini no generó test cases. Revisa la descripción de la HU e intenta de nuevo.');
   }
 
-  // ── Step 4: Ask for Test Plan destination ──────────────────────────────────
+  // ── Step 4: Preview loop ───────────────────────────────────────────────────
+  const generateParams = { huName: huTask.name, huDescription: huContent, ambiente, useContext };
+  const confirmed = await runTCPreviewLoop(interaction, tcResult, generateParams);
+  if (!confirmed) return;
+
+  // ── Step 5: Ask for Test Plan destination ──────────────────────────────────
   const buttonRow = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId('tc_new_plan')
@@ -90,13 +106,14 @@ async function execute(interaction) {
 
   await interaction.editReply({
     content:
-      `✅ Se generaron **${tcResult.test_cases.length} test cases** para:\n` +
+      `✅ Se generaron **${confirmed.test_cases.length} test cases** para:\n` +
       `> **${huTask.name}**\n\n` +
       `¿Dónde deseas crearlos?`,
+    embeds: [],
     components: [buttonRow],
   });
 
-  // ── Step 5: Collector ──────────────────────────────────────────────────────
+  // ── Step 6: Collector ──────────────────────────────────────────────────────
   const collector = interaction.channel.createMessageComponentCollector({
     filter: (i) => i.user.id === interaction.user.id,
     time: COLLECTOR_TIMEOUT_MS,
@@ -107,12 +124,11 @@ async function execute(interaction) {
       if (i.customId === 'tc_new_plan') {
         collector.stop('handled');
         await i.deferUpdate();
-        await finalize(interaction, huTask, tcResult, ambiente, null);
+        await finalize(interaction, huTask, confirmed, ambiente, null);
 
       } else if (i.customId === 'tc_existing_plan') {
         await i.deferUpdate();
 
-        // Fetch Test Plans from QA list
         let tasks;
         try {
           tasks = await getTasksInList(process.env.CLICKUP_QA_LIST_ID);
@@ -124,7 +140,6 @@ async function execute(interaction) {
           });
         }
 
-        // Filter tasks by custom_type 1011 (Test Plan)
         const testPlans = tasks.filter((t) => t.custom_type === 1011);
 
         if (!testPlans.length) {
@@ -155,7 +170,7 @@ async function execute(interaction) {
       } else if (i.customId === 'tc_select_plan') {
         collector.stop('handled');
         await i.deferUpdate();
-        await finalize(interaction, huTask, tcResult, ambiente, i.values[0]);
+        await finalize(interaction, huTask, confirmed, ambiente, i.values[0]);
       }
     } catch (err) {
       logger.error('[testcase] Collector error:', err);
@@ -174,11 +189,135 @@ async function execute(interaction) {
   });
 }
 
+// ── Preview loop: show generated TCs, allow Adjust / Confirm / Cancel ─────────
+async function runTCPreviewLoop(interaction, tcResult, generateParams) {
+  return new Promise((resolve) => {
+    _showTCPreview(interaction, tcResult, generateParams, resolve);
+  });
+}
+
+async function _showTCPreview(interaction, tcResult, generateParams, resolve) {
+  const embed = buildTCPreviewEmbed(tcResult);
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('tc_preview_confirm').setLabel('✅ Continuar').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('tc_preview_adjust').setLabel('✏️ Ajustar').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('tc_preview_cancel').setLabel('❌ Cancelar').setStyle(ButtonStyle.Danger),
+  );
+
+  await interaction.editReply({ content: '', embeds: [embed], components: [row] });
+
+  const collector = interaction.channel.createMessageComponentCollector({
+    filter: (i) => i.user.id === interaction.user.id,
+    time: PREVIEW_TIMEOUT_MS,
+    max: 1,
+  });
+
+  collector.on('collect', async (i) => {
+    try {
+      if (i.customId === 'tc_preview_confirm') {
+        await i.deferUpdate();
+        resolve(tcResult);
+
+      } else if (i.customId === 'tc_preview_cancel') {
+        await i.deferUpdate();
+        await interaction.editReply({ content: '❌ Operación cancelada.', embeds: [], components: [] });
+        resolve(null);
+
+      } else if (i.customId === 'tc_preview_adjust') {
+        const modal = new ModalBuilder()
+          .setCustomId('tc_adjust_modal')
+          .setTitle('Ajustar test cases');
+
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder()
+              .setCustomId('adjustment_input')
+              .setLabel('¿Qué quieres ajustar?')
+              .setStyle(TextInputStyle.Paragraph)
+              .setPlaceholder('Ej: Falta un TC para el caso offline.\nEl TC #2 no tiene sentido, debería verificar...')
+              .setRequired(true)
+          )
+        );
+
+        await i.showModal(modal);
+
+        try {
+          const modalSubmit = await interaction.awaitModalSubmit({
+            time: PREVIEW_TIMEOUT_MS,
+            filter: (m) => m.user.id === interaction.user.id && m.customId === 'tc_adjust_modal',
+          });
+          await modalSubmit.deferUpdate();
+          const adjustment = modalSubmit.fields.getTextInputValue('adjustment_input').trim();
+
+          await interaction.editReply({ content: '🤖 Ajustando test cases con IA...', embeds: [], components: [] });
+
+          let newTcResult;
+          try {
+            newTcResult = await generateTestCases({ ...generateParams, previousReport: tcResult, adjustment });
+          } catch (err) {
+            await interaction.editReply({ content: `❌ Error al ajustar los test cases: ${err.message}`, embeds: [], components: [] });
+            return resolve(null);
+          }
+
+          _showTCPreview(interaction, newTcResult, generateParams, resolve);
+        } catch {
+          await interaction.editReply({ content: '⏱️ Tiempo agotado. Ejecuta el comando de nuevo.', embeds: [], components: [] }).catch(() => {});
+          resolve(null);
+        }
+      }
+    } catch (err) {
+      logger.error('[testcase] Preview loop error:', err);
+      resolve(null);
+    }
+  });
+
+  collector.on('end', (_c, reason) => {
+    if (reason === 'time') {
+      interaction.editReply({
+        content: `⏱️ Tiempo agotado (${PREVIEW_TIMEOUT_MS / 1000}s). Ejecuta el comando de nuevo.`,
+        embeds: [],
+        components: [],
+      }).catch(() => {});
+      resolve(null);
+    }
+  });
+}
+
+// ── Build TC preview embed ────────────────────────────────────────────────────
+function buildTCPreviewEmbed(tcResult) {
+  const tcs = tcResult.test_cases ?? [];
+
+  const titleList = tcs
+    .map((tc, idx) => `${idx + 1}. ${tc.title}`)
+    .join('\n');
+
+  const firstTc = tcs[0];
+  const firstTcPreview = firstTc?.description ?? '';
+
+  const embed = new EmbedBuilder()
+    .setColor(0x00b0f4)
+    .setTitle(`👁️ Test Plan: ${tcResult.test_plan_title ?? 'Sin título'}`)
+    .addFields({
+      name: `🧪 Test Cases (${tcs.length})`,
+      value: titleList.length > 1020 ? titleList.slice(0, 1020) + '...' : titleList || '*(ninguno)*',
+    });
+
+  if (firstTc) {
+    embed.addFields({
+      name: `📋 Muestra — TC #1: ${firstTc.title}`,
+      value: firstTcPreview.length > 1020 ? firstTcPreview.slice(0, 1020) + '...' : firstTcPreview || '*(sin descripción)*',
+    });
+  }
+
+  embed.setFooter({ text: `👁️ Vista previa · ${tcs.length} test cases — aún no se han creado en ClickUp` });
+  return embed;
+}
+
 // ── Finalize: create TCs and link to HU ─────────────────────────────────────
 async function finalize(interaction, huTask, tcResult, ambiente, existingPlanId) {
   await interaction.editReply({ content: '📝 Creando test cases en ClickUp...', components: [] });
 
-  // Get or create Test Plan
   let testPlan;
   try {
     if (existingPlanId) {
@@ -197,7 +336,6 @@ async function finalize(interaction, huTask, tcResult, ambiente, existingPlanId)
 
   const listId = testPlan.list?.id || process.env.CLICKUP_QA_LIST_ID;
 
-  // Create each TC as subtask of the Test Plan and link to HU
   const created = [];
   const failed = [];
 
@@ -212,7 +350,6 @@ async function finalize(interaction, huTask, tcResult, ambiente, existingPlanId)
     }
   }
 
-  // Build response embed
   const allOk = failed.length === 0;
   const embed = new EmbedBuilder()
     .setColor(allOk ? 0x00b0f4 : 0xffa500)

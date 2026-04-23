@@ -1,7 +1,7 @@
 # Contexto del proyecto
 
 ## Decisiones técnicas
-- IA: Gemini con fallback automático entre modelos (gemini-2.5-flash → gemini-2.0-flash → gemini-flash-latest)
+- IA: configurable vía `AI_PROVIDER` en `.env` — `gemini` (default, con fallback automático: gemini-2.5-flash → gemini-2.0-flash → gemini-flash-latest) o `claude` (claude-haiku-4-5-20251001). Servicio unificado en `src/services/ai.js`; `gemini.js` es el archivo legacy sin uso.
 - Deploy: Railway (proceso continuo, no serverless — requerido por WebSocket de Discord)
 - ClickUp Space ID fijo: 90140175053 (Space "4C")
 - HTTP: axios con timeout de 10s y retry automático (hasta 2 intentos) en respuestas 429 y 5xx con back-off exponencial
@@ -20,7 +20,9 @@ Validadas al arranque en `src/index.js` (si falta alguna, el proceso termina). V
 | `CLICKUP_WORKSPACE_ID` | Workspace (team) de ClickUp |
 | `CLICKUP_SPACE_ID` | Space autorizado para crear/validar tareas (p. ej. 90140175053) |
 | `CLICKUP_QA_LIST_ID` | Lista de QA: `/testcase` crea ahí Test Plans y Test Cases (p. ej. 901413246506) |
-| `GEMINI_API_KEY` | Google AI (Gemini) |
+| `AI_PROVIDER` | Proveedor de IA: `gemini` (default) o `claude` |
+| `GEMINI_API_KEY` | Requerido cuando `AI_PROVIDER=gemini` |
+| `ANTHROPIC_API_KEY` | Requerido cuando `AI_PROVIDER=claude` |
 
 ## Mapeo de tipos de tarea (custom_item_id)
 Definido en `src/constants.js` (fuente única — importado por `clickup.js` y `gemini.js`).
@@ -123,9 +125,9 @@ Archivo: `src/commands/testcase.js`
 - `createTestCase(listId, parentId, report, ambiente)` — subtarea `1002`, `content`/`markdown_content`, custom field Environment
 - `linkTasks(taskId, linkedTaskId)` — POST /task/{taskId}/link/{linkedTaskId}
 
-### Funciones en src/services/gemini.js
-- `generateBugReport({ taskId?, tipo, ambiente, descripcion })` — plantilla según `tipo`; `taskId` opcional (omitido en mensaje si no hay padre)
-- `generateTestCases({ huName, huDescription, ambiente })` — `testCaseTemplate.systemPromptFromHU` + `appContext`, 3–8 TCs
+### Funciones en src/services/ai.js
+- `generateBugReport({ taskId?, tipo, ambiente, descripcion, useContext?, previousReport?, adjustment? })` — plantilla según `tipo`; soporta ajuste iterativo pasando el reporte previo y feedback del usuario
+- `generateTestCases({ huName, huDescription, ambiente, useContext?, previousReport?, adjustment? })` — `testCaseTemplate.systemPromptFromHU` + `appContext`, 3–8 TCs; soporta ajuste iterativo
 
 ## Estructura de Test Cases (src/templates/testCase.js)
 
