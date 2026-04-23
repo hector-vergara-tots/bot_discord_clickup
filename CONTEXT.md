@@ -100,6 +100,13 @@ El campo `description` debe seguir **este orden de secciones** (orientado a que 
 
 Los demás tipos de `/bug` (improvement, task, test case, test plan) usan **otras** plantillas (`improvement.js`, `taskDefault.js`, `testCase.js`) con otro Markdown en `description`; el layout anterior aplica al tipo **bug**.
 
+## Skills de QA
+Ubicadas en `src/skills/`. Archivos Markdown con estándares de calidad que se inyectan en el system prompt de Gemini en tiempo de ejecución.
+
+| Archivo | Uso |
+|---------|-----|
+| `skill_tc_qa.md` | Reglas de nomenclatura, estructura, cobertura y anti-patterns para generación de TCs desde HUs. Cargado en `gemini.js` e inyectado únicamente en `generateTestCases`. |
+
 ## Comando /testcase
 Archivo: `src/commands/testcase.js`
 
@@ -108,9 +115,9 @@ Archivo: `src/commands/testcase.js`
 2. Hace fetch de la HU desde ClickUp y valida que `text_content` tenga ≥ 50 caracteres
 3. Llama a `generateTestCases()` en `src/services/gemini.js` usando `testCaseTemplate.systemPromptFromHU`
 4. Gemini devuelve `{ test_plan_title, test_cases: [{ title, description, impact, notes }] }`
-5. Muestra botones con `InteractionCollector` (timeout: 60s):
+5. Muestra botones con `InteractionCollector` (timeout: `COLLECTOR_TIMEOUT_MS` = 60s):
    - **Nuevo Test Plan**: crea uno en `CLICKUP_QA_LIST_ID` con `custom_item_id: 1011`
-   - **Test Plan existente**: carga tareas de `CLICKUP_QA_LIST_ID`, filtra por `custom_type === 1011`, muestra select menu (máx 25)
+   - **Test Plan existente**: carga tareas de `CLICKUP_QA_LIST_ID`, filtra por `Number(t.custom_type) === 1011 || Number(t.custom_item_id) === 1011` (normalización con `Number()` para cubrir string vs número y tareas creadas desde UI vs API), muestra select menu (máx 25)
 6. Crea cada TC como subtarea del Test Plan elegido con `custom_item_id: 1002`
 7. Vincula cada TC a la HU original con `POST /api/v2/task/{hu_id}/link/{tc_id}`
 8. Responde con embed de confirmación (conteo de creados/fallados, links al Test Plan y a la HU)
@@ -125,34 +132,40 @@ Archivo: `src/commands/testcase.js`
 
 ### Funciones en src/services/gemini.js
 - `generateBugReport({ taskId?, tipo, ambiente, descripcion })` — plantilla según `tipo`; `taskId` opcional (omitido en mensaje si no hay padre)
-- `generateTestCases({ huName, huDescription, ambiente })` — `testCaseTemplate.systemPromptFromHU` + `appContext`, 3–8 TCs
+- `generateTestCases({ huName, huDescription, ambiente })` — prompt completo: `appContext` + `skill_tc_qa.md` + `testCaseTemplate.systemPromptFromHU`; genera 4–10 TCs
 
 ## Estructura de Test Cases (src/templates/testCase.js)
 
 ### Secciones del markdown_content de cada TC
-Estructura actualizada — las secciones `Objective` y `Pass Criteria` fueron eliminadas. Cada TC usa exactamente:
 
 ```
 ## Preconditions
-- [Rol requerido — e.g. "Logged in as Inspector"]
-- [Datos, estado previo o setup necesario]
+- [Requisitos de datos o estado del sistema — e.g. “A permit in 'Pending Review' status exists”]
+- [Omitir si no hay requisitos especiales; login y navegación van en Steps]
 
 ## Steps
-1. [Acción atómica en imperativo]
-2. [Acción atómica en imperativo]
-3. [Acción atómica en imperativo]
+1. Log in as [Role] in [Environment] environment.
+2. Navigate to [specific path or module].
+3. [Acción atómica en imperativo — e.g. “Click on the 'Import' button”]
+4. Observe: [qué revisar o con qué interactuar]
 
 ## Expected Result
-[Descripción específica y verificable del resultado esperado]
+[Element/behavior] [is/shows/navigates to/displays] [specific value or state].
 ```
 
 ### Reglas del prompt (TC_RULES — constante compartida entre systemPrompt y systemPromptFromHU)
-- Título con formato: `[Should/Verify] + [acción] + [condición]` — ej: `"Verify that inspector can complete inspection in offline mode"`
-- Preconditions deben incluir el rol del usuario requerido
-- Steps atómicos en imperativo (`Click on...`, `Enter...`, `Navigate to...`, `Select...`) — una acción por paso
-- Sin negrita dentro de los steps
-- Expected Result específico y verificable — prohibido usar frases genéricas como "it works correctly"
+- **Formato de título:** `[Role] - [Verb] [feature/component] [condition]` — ej: `”Admin - Verify Import button shows modal with 2 options on click”`
+- **Verbos permitidos:** Verify, Confirm, Validate, Check — NUNCA Should, Must, Ensure
+- **Incluir el rol** en el título cuando el TC es rol-específico; omitir solo para verificaciones cross-rol
+- **Step 1 siempre es login:** `”Log in as [Role] in [Environment] environment.”`
+- **Último step siempre es Observe:** `”Observe: [qué revisar].”`
+- Steps atómicos en imperativo (`Click on...`, `Enter...`, `Navigate to...`, `Select...`) — sin negrita
+- Expected Result binario (pass/fail), con elementos UI específicos y exactos
+- **Mapping de prioridad → campo `impact`:** Alto = Urgent (happy path, acceso, integridad); Medio = High (flujos alternativos, UI state, edge cases bloqueantes); Bajo = Normal/Low (cosmético, cancelar, UX no bloqueante)
 - Todo en inglés
+
+### Skill inyectada en generateTestCases
+`src/skills/skill_tc_qa.md` se carga una vez en `gemini.js` al iniciar el módulo y se inyecta como sección `## QA Standards & TC Writing Rules` antes de `systemPromptFromHU`. Incluye: nomenclatura, estructura de steps, cobertura (happy path + 2 roles no autorizados + UI state + edge cases), escenarios siempre requeridos, y anti-patterns. Aplica solo a `/testcase`, no a `/bug`.
 
 ## Pendientes / ideas futuras
 - Notificaciones de ClickUp hacia Discord vía webhook

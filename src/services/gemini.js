@@ -11,6 +11,11 @@ const appContext = fs.readFileSync(
   'utf-8'
 );
 
+const tcSkill = fs.readFileSync(
+  path.join(__dirname, '../skills/skill_tc_qa.md'),
+  'utf-8'
+);
+
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 const MODELS = [
@@ -81,7 +86,7 @@ async function generateBugReport({ taskId = null, tipo, ambiente, descripcion })
  * @returns {Promise<Object>}
  */
 async function generateTestCases({ huName, huDescription, ambiente }) {
-  const fullSystemPrompt = `## Application Context\n${appContext}\n\n---\n\n## Your Task\n${testCaseTemplate.systemPromptFromHU}`;
+  const fullSystemPrompt = `## Application Context\n${appContext}\n\n---\n\n## QA Standards & TC Writing Rules\n${tcSkill}\n\n---\n\n## Output Format & Task\n${testCaseTemplate.systemPromptFromHU}`;
 
   const userMessage = `User Story: ${huName}
 Environment: ${ambiente}

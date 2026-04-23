@@ -124,8 +124,13 @@ async function execute(interaction) {
           });
         }
 
-        // Filter tasks by custom_type 1011 (Test Plan)
-        const testPlans = tasks.filter((t) => t.custom_type === 1011);
+        // Filter tasks by custom_type/custom_item_id 1011 (Test Plan).
+        // ClickUp may return the value as a number or a string depending on
+        // how the task was created (via API vs UI), so we use Number() to
+        // normalize before comparing.
+        const testPlans = tasks.filter(
+          (t) => Number(t.custom_type) === 1011 || Number(t.custom_item_id) === 1011
+        );
 
         if (!testPlans.length) {
           collector.stop('handled');
