@@ -17,6 +17,9 @@ const MIN_HU_CONTENT_LENGTH = 50;
 const COLLECTOR_TIMEOUT_MS = 60_000;
 const PREVIEW_TIMEOUT_MS = 120_000;
 
+// Stores adjust callbacks mid-preview: userId -> async (adjustment) => void
+const pendingAdjustments = new Map();
+
 const command = new SlashCommandBuilder()
   .setName('testcase')
   .setDescription('Genera test cases a partir de una HU de ClickUp usando IA')
@@ -74,17 +77,17 @@ async function execute(interaction) {
     );
   }
 
-  // ── Step 3: Generate test cases with Gemini ────────────────────────────────
-  await interaction.editReply('🤖 Generando test cases con Gemini...');
+  // ── Step 3: Generate test cases with AI ────────────────────────────────────
+  await interaction.editReply('🤖 Generando test cases con IA...');
   let tcResult;
   try {
     tcResult = await generateTestCases({ huName: huTask.name, huDescription: huContent, ambiente, useContext });
   } catch (err) {
-    return interaction.editReply(`❌ Error al generar test cases con Gemini: ${err.message}`);
+    return interaction.editReply(`❌ Error al generar test cases: ${err.message}`);
   }
 
   if (!tcResult.test_cases?.length) {
-    return interaction.editReply('❌ Gemini no generó test cases. Revisa la descripción de la HU e intenta de nuevo.');
+    return interaction.editReply('❌ La IA no generó test cases. Revisa la descripción de la HU e intenta de nuevo.');
   }
 
   // ── Step 4: Preview loop ───────────────────────────────────────────────────
@@ -114,7 +117,15 @@ async function execute(interaction) {
   });
 
   // ── Step 6: Collector ──────────────────────────────────────────────────────
-  const collector = interaction.channel.createMessageComponentCollector({
+  const channel = interaction.channel
+    ?? interaction.client.channels.cache.get(interaction.channelId)
+    ?? await interaction.client.channels.fetch(interaction.channelId).catch(() => null);
+
+  if (!channel) {
+    return interaction.editReply({ content: '❌ No se pudo resolver el canal.', components: [] });
+  }
+
+  const collector = channel.createMessageComponentCollector({
     filter: (i) => i.user.id === interaction.user.id,
     time: COLLECTOR_TIMEOUT_MS,
   });
@@ -210,7 +221,16 @@ async function _showTCPreview(interaction, tcResult, generateParams, resolve) {
 
   await interaction.editReply({ content: '', embeds: [embed], components: [row] });
 
-  const collector = interaction.channel.createMessageComponentCollector({
+  const channel = interaction.channel
+    ?? interaction.client.channels.cache.get(interaction.channelId)
+    ?? await interaction.client.channels.fetch(interaction.channelId).catch(() => null);
+
+  if (!channel) {
+    resolve(null);
+    return;
+  }
+
+  const collector = channel.createMessageComponentCollector({
     filter: (i) => i.user.id === interaction.user.id,
     time: PREVIEW_TIMEOUT_MS,
     max: 1,
@@ -243,31 +263,22 @@ async function _showTCPreview(interaction, tcResult, generateParams, resolve) {
           )
         );
 
-        await i.showModal(modal);
-
-        try {
-          const modalSubmit = await interaction.awaitModalSubmit({
-            time: PREVIEW_TIMEOUT_MS,
-            filter: (m) => m.user.id === interaction.user.id && m.customId === 'tc_adjust_modal',
-          });
-          await modalSubmit.deferUpdate();
-          const adjustment = modalSubmit.fields.getTextInputValue('adjustment_input').trim();
-
+        // Store callback — handleTCAdjustModal will call it when the modal is submitted
+        pendingAdjustments.set(interaction.user.id, async (adjustment) => {
           await interaction.editReply({ content: '🤖 Ajustando test cases con IA...', embeds: [], components: [] });
-
           let newTcResult;
           try {
             newTcResult = await generateTestCases({ ...generateParams, previousReport: tcResult, adjustment });
           } catch (err) {
             await interaction.editReply({ content: `❌ Error al ajustar los test cases: ${err.message}`, embeds: [], components: [] });
-            return resolve(null);
+            resolve(null);
+            return;
           }
-
           _showTCPreview(interaction, newTcResult, generateParams, resolve);
-        } catch {
-          await interaction.editReply({ content: '⏱️ Tiempo agotado. Ejecuta el comando de nuevo.', embeds: [], components: [] }).catch(() => {});
-          resolve(null);
-        }
+        });
+
+        await i.showModal(modal);
+        // Flow continues in handleTCAdjustModal when index.js routes the modal submit
       }
     } catch (err) {
       logger.error('[testcase] Preview loop error:', err);
@@ -287,33 +298,57 @@ async function _showTCPreview(interaction, tcResult, generateParams, resolve) {
   });
 }
 
+// ── Embed helper ──────────────────────────────────────────────────────────────
+function addFieldChunks(embed, text, label) {
+  const CHUNK = 1020;
+  if (!text) { embed.addFields({ name: label, value: '*(vacío)*' }); return; }
+  let remaining = text;
+  let index = 0;
+  while (remaining.length > 0) {
+    embed.addFields({
+      name: index === 0 ? label : `${label} (cont.)`,
+      value: remaining.slice(0, CHUNK),
+    });
+    remaining = remaining.slice(CHUNK);
+    index++;
+  }
+}
+
 // ── Build TC preview embed ────────────────────────────────────────────────────
+// Shows TC titles + Spanish descriptions so the reviewer can quickly validate
+// coverage without reading English. ClickUp always receives the English version.
 function buildTCPreviewEmbed(tcResult) {
   const tcs = tcResult.test_cases ?? [];
+  const IMPACT_EMOJI = { Alto: '🔴', Medio: '🟠', Bajo: '🔵' };
 
+  // Title list with impact indicator
   const titleList = tcs
-    .map((tc, idx) => `${idx + 1}. ${tc.title}`)
+    .map((tc, idx) => `${idx + 1}. ${IMPACT_EMOJI[tc.impact] ?? '⚪'} ${tc.title}`)
     .join('\n');
-
-  const firstTc = tcs[0];
-  const firstTcPreview = firstTc?.description ?? '';
 
   const embed = new EmbedBuilder()
     .setColor(0x00b0f4)
     .setTitle(`👁️ Test Plan: ${tcResult.test_plan_title ?? 'Sin título'}`)
     .addFields({
       name: `🧪 Test Cases (${tcs.length})`,
-      value: titleList.length > 1020 ? titleList.slice(0, 1020) + '...' : titleList || '*(ninguno)*',
+      value: titleList.length > 1020 ? titleList.slice(0, 1020) + '…' : titleList || '*(ninguno)*',
     });
 
-  if (firstTc) {
-    embed.addFields({
-      name: `📋 Muestra — TC #1: ${firstTc.title}`,
-      value: firstTcPreview.length > 1020 ? firstTcPreview.slice(0, 1020) + '...' : firstTcPreview || '*(sin descripción)*',
-    });
+  // Show each TC in Spanish — stop before hitting Discord's 6000-char embed limit
+  let charCount = titleList.length;
+  for (const [idx, tc] of tcs.entries()) {
+    const preview = tc.description_es ?? tc.description ?? '';
+    const label = `📋 TC #${idx + 1} — ${tc.title}`;
+    // Each field uses ~label.length + preview.length chars; leave margin for overhead
+    if (charCount + label.length + preview.length > 5500) {
+      embed.addFields({ name: '⚠️ Vista parcial', value: `Mostrando los primeros ${idx} TCs. Revisa los restantes tras crear en ClickUp.` });
+      break;
+    }
+    addFieldChunks(embed, preview, label);
+    charCount += label.length + preview.length;
   }
 
-  embed.setFooter({ text: `👁️ Vista previa · ${tcs.length} test cases — aún no se han creado en ClickUp` });
+  embed.setFooter({ text: `👁️ Vista previa en español · El contenido se creará en inglés en ClickUp` });
   return embed;
 }
 
@@ -387,4 +422,19 @@ async function finalize(interaction, huTask, tcResult, ambiente, existingPlanId)
   });
 }
 
-module.exports = { data: command, execute };
+// ── Modal submit handler (called from index.js) ───────────────────────────────
+async function handleTCAdjustModal(interaction) {
+  await interaction.deferUpdate();
+
+  const callback = pendingAdjustments.get(interaction.user.id);
+  pendingAdjustments.delete(interaction.user.id);
+
+  if (!callback) {
+    return; // session expired or user ran /testcase again — ignore silently
+  }
+
+  const adjustment = interaction.fields.getTextInputValue('adjustment_input').trim();
+  await callback(adjustment);
+}
+
+module.exports = { data: command, execute, handleTCAdjustModal };

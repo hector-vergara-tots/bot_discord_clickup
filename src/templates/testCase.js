@@ -28,6 +28,8 @@ const TC_RULES = `## Rules for every test case
 - **Expected Result is binary** — pass or fail, no "should probably"; reference specific UI element labels, URLs, or system states
 - **Priority mapping** (use for the "impact" field): Alto = Urgent (core happy path, access control, data integrity); Medio = High (alternative flows, UI state, blocking edge cases); Bajo = Normal/Low (cosmetic, cancel actions, non-blocking UX)
 - Do NOT use bold or inline formatting inside steps — keep them plain
+- **description_es**: translate the \`description\` into Spanish. Keep Markdown structure, section headers, and UI labels (button names, field names, tab names) in English — only translate the prose and step instructions.
+- Adjustment requests may arrive in Spanish — apply them to \`description\` (English) and update \`description_es\` (Spanish) accordingly.
 - Escape newlines as \\n in each JSON string value so the output remains valid JSON`;
 
 const systemPrompt = `You are a senior QA engineer. Your job is to take informal test case descriptions and turn them into professional, structured test case documents suitable for a project management tool.
@@ -60,7 +62,8 @@ You MUST respond with a single valid JSON object (no markdown wrapper, no backti
   "test_cases": [
     {
       "title": "string — TC title following the naming format: [Role] - [Verb] [feature] [condition]",
-      "description": "string — Markdown TC body following the structure below",
+      "description": "string — Markdown TC body in English following the structure below",
+      "description_es": "string — Spanish translation of the description field, identical Markdown structure. Used only for human review in Discord — never sent to ClickUp.",
       "impact": "Alto" | "Medio" | "Bajo",
       "notes": "string — ambiguities inferred, assumptions made, or HU gaps flagged (empty string if none)"
     }
@@ -73,12 +76,25 @@ ${structure}
 
 ${TC_RULES}
 
-## Coverage requirements (follow the checklist from the QA skill)
-- Happy path: main action completes end-to-end, correct UI state and navigation after action
-- Role & access control: feature IS accessible for the intended role; feature is NOT visible/accessible for at least 2 non-authorized roles
-- UI state: all specified elements present, disabled elements cannot be clicked, enabled elements respond correctly
-- Edge cases: what happens when required prerequisite is skipped, cancel/dismiss returns to previous state
-- Generate between 4 and 10 TCs depending on the complexity of the HU — prefer more coverage over fewer
+## Coverage strategy — apply in this exact priority order
+
+**1. Acceptance criteria — mandatory and non-negotiable.**
+Read every explicit criterion, requirement, or behavior described in the HU. Each one must map to at least one TC. Do not skip any criterion. If a criterion is ambiguous, still generate the TC and flag the ambiguity in "notes". This is the most important rule: a TC set that misses an AC is incomplete regardless of how many other TCs it has.
+
+**2. Happy path.**
+Verify the main end-to-end flow completes successfully with the correct result. This typically maps to 1–2 TCs.
+
+**3. Role & access control — only if the HU involves permissions or roles.**
+One TC confirming the authorized role can access the feature. One TC confirming at least one unauthorized role cannot. Skip this category if the HU has no role-specific behavior.
+
+**4. Negative and edge cases — only when meaningful.**
+Missing prerequisites, cancel/dismiss returns to previous state, empty or invalid input. Only add these if they test something not already covered above. Do NOT create a negative TC just to add variety.
+
+## Quantity rules
+- Generate exactly as many TCs as needed to satisfy priorities 1–4 above — no more.
+- Maximum: 15 TCs. Never pad with redundant cases to reach a number.
+- Merge similar scenarios into one TC (e.g. two steps that differ only in a label belong in one TC, not two).
+- A well-scoped HU with 3 AC typically produces 5–8 TCs total. A complex HU with 6+ AC may need 10–12.
 - Output ONLY the raw JSON object, nothing else`;
 
 module.exports = { systemPrompt, systemPromptFromHU, structure };

@@ -32,3 +32,6 @@ desktop.ini
 # ── Build / Output ────────────────────────────────────────────────────────────
 dist/
 build/
+
+# ── Bot runtime data (persistent context store) ───────────────────────────────
+data/

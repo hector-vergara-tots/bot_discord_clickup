@@ -1,7 +1,10 @@
 {
   "permissions": {
     "allow": [
-      "mcp__claude_ai_ClickUp__clickup_get_workspace_hierarchy"
+      "mcp__claude_ai_ClickUp__clickup_get_workspace_hierarchy",
+      "Bash(node -e \"const b = require\\('./src/commands/bug'\\); console.log\\('bug.js OK:', b.data.name\\); const c = require\\('./src/commands/conocimiento'\\); console.log\\('conocimiento.js OK:', c.data.name\\);\")",
+      "Bash(node -e \"const b = require\\('./src/commands/bug'\\); console.log\\('OK:', b.data.name\\); const opts = b.data.options.map\\(o => o.name\\); console.log\\('Opciones:', opts\\);\")",
+      "WebFetch(domain:docs.anthropic.com)"
     ]
   }
 }

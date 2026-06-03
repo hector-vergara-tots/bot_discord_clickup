@@ -8,15 +8,32 @@ const {
   TextInputBuilder,
   TextInputStyle,
 } = require('discord.js');
-const { generateBugReport } = require('../services/ai');
-const { getWorkspaceMembers, getTask, createSubtask, getCurrentSprint } = require('../services/clickup');
-const { resolveClickUpAssignee } = require('../utils/parser');
+const { generateBugReport, extractLearnings } = require('../services/ai');
+const { getTask, createSubtask, getCurrentSprint } = require('../services/clickup');
+const contextStore  = require('../services/contextStore');
+const knowledgeBase = require('../services/knowledgeBase');
 const logger = require('../utils/logger');
 
 const IMPACT_COLORS = { Alto: 0xff0000, Medio: 0xffa500, Bajo: 0x00b0f4 };
 const IMPACT_EMOJIS = { Alto: '🔴', Medio: '🟠', Bajo: '🔵' };
 const COLLECTOR_TIMEOUT_MS = 60_000;
-const PREVIEW_TIMEOUT_MS = 120_000;
+const PREVIEW_TIMEOUT_MS   = 120_000;
+
+// Stores params from execute() until handleBugModal() picks them up
+// Key: userId, Value: { tipo, ambiente, useContext }
+const pendingExecutions = new Map();
+
+const CONTEXT_KEYWORDS = [
+  'anterior', 'bug anterior', 'issue anterior', 'reporte anterior',
+  'similar al anterior', 'basado en el anterior', 'basado en el bug anterior',
+  'como el anterior', 'igual que antes', 'mismo que antes',
+  'el bug de antes', 'bug previo', 'el anterior',
+];
+
+function detectsContextReference(text) {
+  const lower = text.toLowerCase();
+  return CONTEXT_KEYWORDS.some((kw) => lower.includes(kw));
+}
 
 const command = new SlashCommandBuilder()
   .setName('bug')
@@ -27,11 +44,11 @@ const command = new SlashCommandBuilder()
       .setDescription('Tipo de subtarea')
       .setRequired(true)
       .addChoices(
-        { name: '🐛 Bug', value: 'bug' },
+        { name: '🐛 Bug',        value: 'bug' },
         { name: '✨ Improvement', value: 'improvement' },
-        { name: '📋 Task', value: 'task' },
-        { name: '🧪 Test Case', value: 'test case' },
-        { name: '📑 Test Plan', value: 'test plan' }
+        { name: '📋 Task',        value: 'task' },
+        { name: '🧪 Test Case',   value: 'test case' },
+        { name: '📑 Test Plan',   value: 'test plan' }
       )
   )
   .addStringOption((opt) =>
@@ -41,27 +58,9 @@ const command = new SlashCommandBuilder()
       .setRequired(true)
       .addChoices(
         { name: '💻 Development', value: 'development' },
-        { name: '🧪 Staging', value: 'staging' },
-        { name: '🚀 Production', value: 'production' }
+        { name: '🧪 Staging',     value: 'staging' },
+        { name: '🚀 Production',  value: 'production' }
       )
-  )
-  .addStringOption((opt) =>
-    opt
-      .setName('descripcion')
-      .setDescription('Descripción informal de qué pasa y qué debería pasar')
-      .setRequired(true)
-  )
-  .addStringOption((opt) =>
-    opt
-      .setName('task_id')
-      .setDescription('ID de la tarea padre (opcional — si no se indica se ofrecerá crear en el sprint actual)')
-      .setRequired(false)
-  )
-  .addUserOption((opt) =>
-    opt
-      .setName('asignado')
-      .setDescription('Usuario de Discord a quien asignar la tarea')
-      .setRequired(false)
   )
   .addBooleanOption((opt) =>
     opt
@@ -71,27 +70,105 @@ const command = new SlashCommandBuilder()
   );
 
 async function execute(interaction) {
+  const tipo       = interaction.options.getString('tipo');
+  const ambiente   = interaction.options.getString('ambiente');
+  const useContext = interaction.options.getBoolean('contexto_app') ?? true;
+
+  // Store params so handleBugModal() can pick them up when the modal is submitted
+  pendingExecutions.set(interaction.user.id, { tipo, ambiente, useContext });
+
+  const modal = new ModalBuilder()
+    .setCustomId('bug_main_modal')
+    .setTitle('Reportar Bug / Tarea');
+
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId('descripcion_input')
+        .setLabel('Descripción')
+        .setStyle(TextInputStyle.Paragraph)
+        .setPlaceholder('Qué pasa y qué debería pasar...')
+        .setRequired(true)
+        .setMaxLength(4000)
+    ),
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId('evidencia_input')
+        .setLabel('Evidencia — JAM, screenshot, link (opcional)')
+        .setStyle(TextInputStyle.Short)
+        .setPlaceholder('https://jam.dev/...')
+        .setRequired(false)
+        .setMaxLength(500)
+    ),
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId('task_id_input')
+        .setLabel('ID de tarea padre (opcional)')
+        .setStyle(TextInputStyle.Short)
+        .setPlaceholder('ej: abc123xyz — vacío para usar el sprint actual')
+        .setRequired(false)
+        .setMaxLength(100)
+    ),
+  );
+
+  await interaction.showModal(modal);
+  // Flow continues in handleBugModal() when index.js routes the modal submit
+}
+
+// ── Modal submit handler (called from index.js) ───────────────────────────────
+async function handleBugModal(interaction) {
+  // Acknowledge immediately — Discord requires a response within 3 seconds
   await interaction.deferReply();
 
-  const tipo             = interaction.options.getString('tipo');
-  const ambiente         = interaction.options.getString('ambiente');
-  const descripcion      = interaction.options.getString('descripcion');
-  const taskId           = interaction.options.getString('task_id')?.trim() ?? null;
-  const discordAssignee  = interaction.options.getUser('asignado');
-  const useContext       = interaction.options.getBoolean('contexto_app') ?? true;
+  const pending = pendingExecutions.get(interaction.user.id);
+  pendingExecutions.delete(interaction.user.id);
+
+  if (!pending) {
+    return interaction.editReply({ content: '❌ No se encontró contexto del comando. Ejecuta `/bug` de nuevo.', embeds: [], components: [] });
+  }
+
+  const { tipo, ambiente, useContext } = pending;
+
+  // getTextInputValue with required=false returns null when optional field is blank
+  const descripcion = interaction.fields.getTextInputValue('descripcion_input').trim();
+  const evidencia   = interaction.fields.getTextInputValue('evidencia_input', false)?.trim() || null;
+  const taskId      = interaction.fields.getTextInputValue('task_id_input', false)?.trim() || null;
+
+  const autoDetected    = detectsContextReference(descripcion);
+  const previousContext = autoDetected ? contextStore.getRecent(interaction.user.id) : null;
+
+  if (autoDetected && previousContext) {
+    logger.info(`[bug] Auto-detected context reference for user ${interaction.user.id}, injecting previous report.`);
+  } else if (autoDetected && !previousContext) {
+    logger.info(`[bug] Context reference detected but no recent entry found for user ${interaction.user.id}.`);
+  }
+
+  const params = { tipo, ambiente, descripcion, evidencia, useContext, previousContext };
 
   if (taskId) {
-    await handleWithParentTask(interaction, { taskId, tipo, ambiente, descripcion, discordAssignee, useContext });
+    await handleWithParentTask(interaction, { ...params, taskId });
   } else {
-    await showDestinationChoice(interaction, { tipo, ambiente, descripcion, discordAssignee, useContext });
+    await showDestinationChoice(interaction, params);
   }
 }
 
+// ── Post-creation side effects (non-blocking) ─────────────────────────────────
+function afterTaskCreated(userId, { tipo, ambiente, descripcion, report }) {
+  contextStore.save(userId, { tipo, ambiente, descripcion, report });
+
+  const date = new Date().toISOString().split('T')[0];
+  extractLearnings({ tipo, ambiente, descripcion, report })
+    .then((summary) => {
+      if (summary) knowledgeBase.appendLearning({ date, tipo, ambiente, summary });
+    })
+    .catch((err) => logger.warn(`[bug] Learning extraction failed: ${err.message}`));
+}
+
 // ── Flow A: task_id provided — create subtask under parent ───────────────────
-async function handleWithParentTask(interaction, { taskId, tipo, ambiente, descripcion, discordAssignee, useContext = true }) {
+async function handleWithParentTask(interaction, { taskId, tipo, ambiente, descripcion, evidencia = null, useContext = true, previousContext = null }) {
   try {
-    // Step 1: Fetch parent task
     await interaction.editReply({ content: '⏳ Obteniendo tarea padre en ClickUp...', embeds: [], components: [] });
+
     let parentTask;
     try {
       parentTask = await getTask(taskId);
@@ -110,9 +187,8 @@ async function handleWithParentTask(interaction, { taskId, tipo, ambiente, descr
       return interaction.editReply({ content: '❌ No se pudo obtener el ID de la lista de la tarea padre.', embeds: [], components: [] });
     }
 
-    // Space validation
     const allowedSpaceId = process.env.CLICKUP_SPACE_ID;
-    const taskSpaceId = String(parentTask.space?.id ?? '');
+    const taskSpaceId    = String(parentTask.space?.id ?? '');
     if (allowedSpaceId && taskSpaceId !== allowedSpaceId) {
       return interaction.editReply({
         content:
@@ -123,34 +199,39 @@ async function handleWithParentTask(interaction, { taskId, tipo, ambiente, descr
       });
     }
 
-    // Step 2: Resolve assignee
-    const assigneeId = await resolveAssignee(interaction, discordAssignee);
+    const contextHint = previousContext ? ' _(usando contexto del bug anterior)_' : '';
+    await interaction.editReply({ content: `🤖 Redactando reporte con IA...${contextHint}`, embeds: [], components: [] });
 
-    // Step 3: Generate report
-    await interaction.editReply({ content: '🤖 Redactando reporte con IA...', embeds: [], components: [] });
     let report;
     try {
-      report = await generateBugReport({ taskId, tipo, ambiente, descripcion, useContext });
+      report = await generateBugReport({
+        taskId,
+        tipo,
+        ambiente,
+        descripcion,
+        evidencia,
+        useContext,
+        contextReport: previousContext?.report ?? null,
+      });
     } catch (err) {
-      return interaction.editReply({ content: `❌ Error al generar el reporte con Gemini: ${err.message}`, embeds: [], components: [] });
+      return interaction.editReply({ content: `❌ Error al generar el reporte con IA: ${err.message}`, embeds: [], components: [] });
     }
 
-    // Step 4: Preview loop
-    const generateParams = { taskId, tipo, ambiente, descripcion, useContext };
+    const generateParams = { taskId, tipo, ambiente, descripcion, evidencia, useContext };
     const confirmed = await runBugPreviewLoop(interaction, report, generateParams, tipo, ambiente);
     if (!confirmed) return;
 
-    // Step 5: Create subtask
     await interaction.editReply({ content: '📝 Creando subtarea en ClickUp...', embeds: [], components: [] });
+
     let createdTask;
     try {
-      createdTask = await createSubtask({ parentTaskId: taskId, listId, tipo, ambiente, assigneeId, report: confirmed });
+      createdTask = await createSubtask({ parentTaskId: taskId, listId, tipo, ambiente, assigneeId: null, report: confirmed });
     } catch (err) {
       return interaction.editReply({ content: `❌ Error al crear la subtarea en ClickUp: ${err.response?.data?.err || err.message}`, embeds: [], components: [] });
     }
 
-    // Step 6: Success embed
-    await sendSuccessEmbed(interaction, { report: confirmed, createdTask, tipo, ambiente, discordAssignee, assigneeId, parentLabel: `[${parentTask.name}](${parentTask.url})`, parentKey: '🔗 Tarea padre' });
+    await sendSuccessEmbed(interaction, { report: confirmed, createdTask, tipo, ambiente, parentLabel: `[${parentTask.name}](${parentTask.url})`, parentKey: '🔗 Tarea padre' });
+    afterTaskCreated(interaction.user.id, { tipo, ambiente, descripcion, report: confirmed });
   } catch (err) {
     logger.error('[bug] Unexpected error:', err);
     await interaction.editReply({ content: `❌ Error inesperado: ${err.message}`, embeds: [], components: [] });
@@ -164,13 +245,12 @@ async function showDestinationChoice(interaction, params) {
     new ButtonBuilder().setCustomId('bug_task').setLabel('🔗 Asociar a tarea').setStyle(ButtonStyle.Secondary),
   );
 
-  await interaction.editReply({
-    content: '¿Dónde deseas crear la tarea?',
-    embeds: [],
-    components: [row],
-  });
+  await interaction.editReply({ content: '¿Dónde deseas crear la tarea?', embeds: [], components: [row] });
 
-  const collector = interaction.channel.createMessageComponentCollector({
+  const channel = await resolveChannel(interaction);
+  if (!channel) return interaction.editReply({ content: '❌ No se pudo resolver el canal.', embeds: [], components: [] });
+
+  const collector = channel.createMessageComponentCollector({
     filter: (i) => i.user.id === interaction.user.id,
     time: COLLECTOR_TIMEOUT_MS,
     max: 1,
@@ -183,11 +263,11 @@ async function showDestinationChoice(interaction, params) {
         await handleSprintFlow(interaction, params);
 
       } else if (i.customId === 'bug_task') {
-        const modal = new ModalBuilder()
+        const taskModal = new ModalBuilder()
           .setCustomId('bug_task_id_modal')
           .setTitle('ID de la Tarea Padre');
 
-        modal.addComponents(
+        taskModal.addComponents(
           new ActionRowBuilder().addComponents(
             new TextInputBuilder()
               .setCustomId('task_id_input')
@@ -198,7 +278,7 @@ async function showDestinationChoice(interaction, params) {
           )
         );
 
-        await i.showModal(modal);
+        await i.showModal(taskModal);
 
         try {
           const modalSubmit = await interaction.awaitModalSubmit({
@@ -255,7 +335,10 @@ async function handleSprintFlow(interaction, params) {
     components: [confirmRow],
   });
 
-  const collector = interaction.channel.createMessageComponentCollector({
+  const channel = await resolveChannel(interaction);
+  if (!channel) return interaction.editReply({ content: '❌ No se pudo resolver el canal.', embeds: [], components: [] });
+
+  const collector = channel.createMessageComponentCollector({
     filter: (i) => i.user.id === interaction.user.id,
     time: COLLECTOR_TIMEOUT_MS,
     max: 1,
@@ -282,24 +365,31 @@ async function handleSprintFlow(interaction, params) {
 }
 
 // ── Flow B1 final: generate report and create directly in sprint ──────────────
-async function proceedWithSprint(interaction, sprint, { tipo, ambiente, descripcion, discordAssignee, useContext = true }) {
+async function proceedWithSprint(interaction, sprint, { tipo, ambiente, descripcion, evidencia = null, useContext = true, previousContext = null }) {
   try {
-    const assigneeId = await resolveAssignee(interaction, discordAssignee);
+    const contextHint = previousContext ? ' _(usando contexto del bug anterior)_' : '';
+    await interaction.editReply({ content: `🤖 Redactando reporte con IA...${contextHint}`, embeds: [], components: [] });
 
-    await interaction.editReply({ content: '🤖 Redactando reporte con IA...', embeds: [], components: [] });
     let report;
     try {
-      report = await generateBugReport({ tipo, ambiente, descripcion, useContext });
+      report = await generateBugReport({
+        tipo,
+        ambiente,
+        descripcion,
+        evidencia,
+        useContext,
+        contextReport: previousContext?.report ?? null,
+      });
     } catch (err) {
-      return interaction.editReply({ content: `❌ Error al generar el reporte con Gemini: ${err.message}`, embeds: [], components: [] });
+      return interaction.editReply({ content: `❌ Error al generar el reporte con IA: ${err.message}`, embeds: [], components: [] });
     }
 
-    // Preview loop
-    const generateParams = { tipo, ambiente, descripcion, useContext };
+    const generateParams = { tipo, ambiente, descripcion, evidencia, useContext };
     const confirmed = await runBugPreviewLoop(interaction, report, generateParams, tipo, ambiente);
     if (!confirmed) return;
 
     await interaction.editReply({ content: '📝 Creando tarea en el sprint...', embeds: [], components: [] });
+
     let createdTask;
     try {
       createdTask = await createSubtask({
@@ -307,21 +397,22 @@ async function proceedWithSprint(interaction, sprint, { tipo, ambiente, descripc
         listId: sprint.id,
         tipo,
         ambiente,
-        assigneeId,
+        assigneeId: null,
         report: confirmed,
       });
     } catch (err) {
       return interaction.editReply({ content: `❌ Error al crear la tarea en el sprint: ${err.response?.data?.err || err.message}`, embeds: [], components: [] });
     }
 
-    await sendSuccessEmbed(interaction, { report: confirmed, createdTask, tipo, ambiente, discordAssignee, assigneeId, parentLabel: sprint.name, parentKey: '🏃 Sprint' });
+    await sendSuccessEmbed(interaction, { report: confirmed, createdTask, tipo, ambiente, parentLabel: sprint.name, parentKey: '🏃 Sprint' });
+    afterTaskCreated(interaction.user.id, { tipo, ambiente, descripcion, report: confirmed });
   } catch (err) {
     logger.error('[bug] Sprint task creation error:', err);
     await interaction.editReply({ content: `❌ Error inesperado: ${err.message}`, embeds: [], components: [] });
   }
 }
 
-// ── Preview loop: show generated report, allow Adjust / Confirm / Cancel ─────
+// ── Preview loop ──────────────────────────────────────────────────────────────
 async function runBugPreviewLoop(interaction, report, generateParams, tipo, ambiente) {
   return new Promise((resolve) => {
     _showBugPreview(interaction, report, generateParams, tipo, ambiente, resolve);
@@ -339,7 +430,10 @@ async function _showBugPreview(interaction, report, generateParams, tipo, ambien
 
   await interaction.editReply({ content: '', embeds: [embed], components: [row] });
 
-  const collector = interaction.channel.createMessageComponentCollector({
+  const channel = await resolveChannel(interaction);
+  if (!channel) { resolve(null); return; }
+
+  const collector = channel.createMessageComponentCollector({
     filter: (i) => i.user.id === interaction.user.id,
     time: PREVIEW_TIMEOUT_MS,
     max: 1,
@@ -416,41 +510,60 @@ async function _showBugPreview(interaction, report, generateParams, tipo, ambien
   });
 }
 
-// ── Build preview embed ───────────────────────────────────────────────────────
+// ── Channel helper ────────────────────────────────────────────────────────────
+// ModalSubmitInteraction.channel can be null if the channel isn't cached yet
+async function resolveChannel(interaction) {
+  return interaction.channel
+    ?? interaction.client.channels.cache.get(interaction.channelId)
+    ?? await interaction.client.channels.fetch(interaction.channelId).catch(() => null);
+}
+
+// ── Embed helpers ─────────────────────────────────────────────────────────────
+function addDescriptionChunks(embed, text, label) {
+  const CHUNK = 1020;
+  if (!text) {
+    embed.addFields({ name: label, value: '*(vacío)*' });
+    return;
+  }
+  let remaining = text;
+  let index = 0;
+  while (remaining.length > 0) {
+    embed.addFields({
+      name: index === 0 ? label : `${label} (cont.)`,
+      value: remaining.slice(0, CHUNK),
+    });
+    remaining = remaining.slice(CHUNK);
+    index++;
+  }
+}
+
 function buildBugPreviewEmbed(report, tipo, ambiente) {
-  const color = IMPACT_COLORS[report.impact] ?? 0x7289da;
+  const color       = IMPACT_COLORS[report.impact] ?? 0x7289da;
   const impactEmoji = IMPACT_EMOJIS[report.impact] ?? '⚪';
 
   const embed = new EmbedBuilder()
     .setColor(color)
     .setTitle(`👁️ ${report.title}`)
     .addFields(
-      { name: '📌 Tipo',              value: tipo,          inline: true },
-      { name: '🌍 Ambiente',          value: ambiente,       inline: true },
-      { name: `${impactEmoji} Impacto`, value: report.impact, inline: true },
+      { name: '📌 Tipo',                value: tipo,          inline: true },
+      { name: '🌍 Ambiente',            value: ambiente,       inline: true },
+      { name: `${impactEmoji} Impacto`, value: report.impact,  inline: true },
     );
 
-  const desc = report.description ?? '';
-  embed.addFields({
-    name: '📝 Descripción',
-    value: desc.length > 1020 ? desc.slice(0, 1020) + '...' : desc || '*(vacío)*',
-  });
+  // Show Spanish preview if available, fall back to English
+  const previewText = report.descripcion_preview ?? report.description ?? '';
+  addDescriptionChunks(embed, previewText, '📝 Descripción');
 
   if (report.notes) {
-    const notes = report.notes;
-    embed.addFields({
-      name: '🗒️ Notas internas',
-      value: notes.length > 1020 ? notes.slice(0, 1020) + '...' : notes,
-    });
+    addDescriptionChunks(embed, report.notes, '🗒️ Notas internas');
   }
 
-  embed.setFooter({ text: '👁️ Vista previa — aún no se ha creado en ClickUp' });
+  embed.setFooter({ text: '👁️ Vista previa en español · El reporte se creará en inglés en ClickUp' });
   return embed;
 }
 
-// ── Build success embed ───────────────────────────────────────────────────────
-async function sendSuccessEmbed(interaction, { report, createdTask, tipo, ambiente, discordAssignee, assigneeId, parentLabel, parentKey }) {
-  const color = IMPACT_COLORS[report.impact] ?? 0x7289da;
+async function sendSuccessEmbed(interaction, { report, createdTask, tipo, ambiente, parentLabel, parentKey }) {
+  const color       = IMPACT_COLORS[report.impact] ?? 0x7289da;
   const impactEmoji = IMPACT_EMOJIS[report.impact] ?? '⚪';
 
   const embed = new EmbedBuilder()
@@ -461,42 +574,14 @@ async function sendSuccessEmbed(interaction, { report, createdTask, tipo, ambien
       { name: '📌 Tipo',                value: tipo,          inline: true },
       { name: '🌍 Ambiente',            value: ambiente,       inline: true },
       { name: `${impactEmoji} Impacto`, value: report.impact,  inline: true },
-      {
-        name: '👤 Asignado',
-        value: discordAssignee
-          ? (assigneeId ? `<@${discordAssignee.id}>` : `${discordAssignee.username} *(no encontrado en ClickUp)*`)
-          : 'Sin asignar',
-        inline: true,
-      },
       { name: parentKey, value: parentLabel, inline: false },
-      {
-        name: '📝 Descripción generada',
-        value: report.description.slice(0, 300) + (report.description.length > 300 ? '...' : ''),
-        inline: false,
-      }
     )
     .setFooter({ text: `Reportado por ${interaction.user.username} · ClickUp ID: ${createdTask.id}` })
     .setTimestamp();
 
+  addDescriptionChunks(embed, report.description ?? '', '📝 Descripción generada');
+
   await interaction.editReply({ content: `🎉 Tarea creada exitosamente: ${createdTask.url}`, embeds: [embed], components: [] });
 }
 
-// ── Helper: resolve Discord user → ClickUp assignee ID ───────────────────────
-async function resolveAssignee(interaction, discordAssignee) {
-  if (!discordAssignee) return null;
-
-  await interaction.editReply({ content: '⏳ Buscando usuario en ClickUp...', embeds: [], components: [] });
-  try {
-    const members = await getWorkspaceMembers();
-    const assigneeId = resolveClickUpAssignee(discordAssignee.username, members);
-    if (!assigneeId) {
-      logger.warn(`[bug] No ClickUp member found for Discord user: ${discordAssignee.username}`);
-    }
-    return assigneeId;
-  } catch (err) {
-    logger.error('[bug] Failed to fetch workspace members:', err.message);
-    return null;
-  }
-}
-
-module.exports = { data: command, execute };
+module.exports = { data: command, execute, handleBugModal };

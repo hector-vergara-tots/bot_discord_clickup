@@ -2,8 +2,9 @@ require('dotenv').config();
 
 const { Client, GatewayIntentBits, REST, Routes, Collection } = require('discord.js');
 const logger = require('./utils/logger');
-const bugCommand = require('./commands/bug');
-const testcaseCommand = require('./commands/testcase');
+const bugCommand         = require('./commands/bug');
+const testcaseCommand    = require('./commands/testcase');
+const conocimientoCommand = require('./commands/conocimiento');
 
 // ── Validate required env vars ──────────────────────────────────────────────
 const AI_PROVIDER = (process.env.AI_PROVIDER || 'gemini').toLowerCase();
@@ -45,6 +46,7 @@ const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 client.commands = new Collection();
 client.commands.set(bugCommand.data.name, bugCommand);
 client.commands.set(testcaseCommand.data.name, testcaseCommand);
+client.commands.set(conocimientoCommand.data.name, conocimientoCommand);
 
 // ── Register slash commands with Discord ─────────────────────────────────────
 async function registerCommands() {
@@ -82,24 +84,52 @@ client.once('ready', async (c) => {
 
 // ── Event: interaction ────────────────────────────────────────────────────────
 client.on('interactionCreate', async (interaction) => {
-  if (!interaction.isChatInputCommand()) return;
-
-  const command = client.commands.get(interaction.commandName);
-  if (!command) {
-    logger.warn(`[bot] Unknown command: ${interaction.commandName}`);
+  // ── Slash commands ───────────────────────────────────────────────────────────
+  if (interaction.isChatInputCommand()) {
+    const command = client.commands.get(interaction.commandName);
+    if (!command) {
+      logger.warn(`[bot] Unknown command: ${interaction.commandName}`);
+      return;
+    }
+    try {
+      await command.execute(interaction);
+    } catch (err) {
+      logger.error(`[bot] Error executing /${interaction.commandName}:`, err);
+      const reply = { content: '❌ Ocurrió un error inesperado.', ephemeral: true };
+      if (interaction.deferred || interaction.replied) {
+        await interaction.editReply(reply).catch(() => {});
+      } else {
+        await interaction.reply(reply).catch(() => {});
+      }
+    }
     return;
   }
 
-  try {
-    await command.execute(interaction);
-  } catch (err) {
-    logger.error(`[bot] Error executing /${interaction.commandName}:`, err);
-    const reply = { content: '❌ Ocurrió un error inesperado.', ephemeral: true };
-    if (interaction.deferred || interaction.replied) {
-      await interaction.editReply(reply).catch(() => {});
-    } else {
-      await interaction.reply(reply).catch(() => {});
+  // ── Modal submits ────────────────────────────────────────────────────────────
+  if (interaction.isModalSubmit()) {
+    let handler = null;
+
+    if (interaction.customId === 'bug_main_modal') {
+      handler = () => bugCommand.handleBugModal(interaction);
+    } else if (interaction.customId === 'tc_adjust_modal') {
+      handler = () => testcaseCommand.handleTCAdjustModal(interaction);
     }
+
+    if (handler) {
+      try {
+        await handler();
+      } catch (err) {
+        logger.error(`[bot] Error handling modal ${interaction.customId}:`, err);
+        const reply = { content: '❌ Ocurrió un error inesperado al procesar el formulario.', ephemeral: true };
+        if (interaction.deferred || interaction.replied) {
+          await interaction.editReply(reply).catch(() => {});
+        } else {
+          await interaction.reply(reply).catch(() => {});
+        }
+      }
+    }
+    // otros modals (preview_adjust_modal, bug_task_id_modal) los manejan
+    // sus propios awaitModalSubmit dentro de cada comando — no necesitan routing aquí
   }
 });
 
