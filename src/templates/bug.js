@@ -44,7 +44,7 @@ ${structure}
 - Use **bold** sparingly in steps for critical actions or UI labels.
 - **descripcion_preview**: translate the \`description\` into Spanish. Keep all Markdown formatting and English labels inside the content (e.g., **Result:**, section headers) exactly as they appear in \`description\` — only translate the prose.
 - Adjustment requests may arrive in Spanish — apply them to \`description\` (English) and update \`descripcion_preview\` (Spanish) accordingly.
-- Escape newlines as \\n in the JSON string values so the output remains valid JSON.
+- Use real line breaks inside field values for paragraphs and Markdown sections — do NOT write the literal characters \\n.
 - Title: max 80 characters; prefer "[Area] — [broken behavior]" over vague titles like "Bug in login".
 - Impact: Alto = data loss / production down / security issue; Medio = feature broken or wrong behavior with possible workaround; Bajo = cosmetic / minor UX.
 - Output ONLY the raw JSON object, nothing else.`;

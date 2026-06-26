@@ -35,7 +35,7 @@ ${structure}
 - Write entirely in English with a clear and professional tone
 - Use **bold** to highlight key terms, deliverables, and important constraints
 - Acceptance criteria must be specific and verifiable, not vague
-- Escape newlines as \\n in the JSON string so the value remains valid JSON
+- Use real line breaks inside field values — do NOT write the literal characters \\n.
 - Title: action-oriented and specific, max 80 characters (e.g. "Migrate user table to new schema")
 - Impact: Alto = blocking or critical path; Medio = important but not blocking; Bajo = low priority or optional
 - Output ONLY the raw JSON object, nothing else`;

@@ -214,7 +214,10 @@ async function handleWithParentTask(interaction, { taskId, tipo, ambiente, descr
         contextReport: previousContext?.report ?? null,
       });
     } catch (err) {
-      return interaction.editReply({ content: `❌ Error al generar el reporte con IA: ${err.message}`, embeds: [], components: [] });
+      return sendErrorWithContext(interaction, {
+        errorMsg: `Error al generar el reporte con IA: ${err.message}`,
+        tipo, ambiente, descripcion, evidencia, taskId,
+      });
     }
 
     const generateParams = { taskId, tipo, ambiente, descripcion, evidencia, useContext };
@@ -227,7 +230,10 @@ async function handleWithParentTask(interaction, { taskId, tipo, ambiente, descr
     try {
       createdTask = await createSubtask({ parentTaskId: taskId, listId, tipo, ambiente, assigneeId: null, report: confirmed });
     } catch (err) {
-      return interaction.editReply({ content: `❌ Error al crear la subtarea en ClickUp: ${err.response?.data?.err || err.message}`, embeds: [], components: [] });
+      return sendErrorWithContext(interaction, {
+        errorMsg: `Error al crear la subtarea en ClickUp: ${err.response?.data?.err || err.message}`,
+        tipo, ambiente, descripcion, evidencia, taskId,
+      });
     }
 
     await sendSuccessEmbed(interaction, { report: confirmed, createdTask, tipo, ambiente, parentLabel: `[${parentTask.name}](${parentTask.url})`, parentKey: '🔗 Tarea padre' });
@@ -381,7 +387,10 @@ async function proceedWithSprint(interaction, sprint, { tipo, ambiente, descripc
         contextReport: previousContext?.report ?? null,
       });
     } catch (err) {
-      return interaction.editReply({ content: `❌ Error al generar el reporte con IA: ${err.message}`, embeds: [], components: [] });
+      return sendErrorWithContext(interaction, {
+        errorMsg: `Error al generar el reporte con IA: ${err.message}`,
+        tipo, ambiente, descripcion, evidencia,
+      });
     }
 
     const generateParams = { tipo, ambiente, descripcion, evidencia, useContext };
@@ -401,7 +410,10 @@ async function proceedWithSprint(interaction, sprint, { tipo, ambiente, descripc
         report: confirmed,
       });
     } catch (err) {
-      return interaction.editReply({ content: `❌ Error al crear la tarea en el sprint: ${err.response?.data?.err || err.message}`, embeds: [], components: [] });
+      return sendErrorWithContext(interaction, {
+        errorMsg: `Error al crear la tarea en el sprint: ${err.response?.data?.err || err.message}`,
+        tipo, ambiente, descripcion, evidencia,
+      });
     }
 
     await sendSuccessEmbed(interaction, { report: confirmed, createdTask, tipo, ambiente, parentLabel: sprint.name, parentKey: '🏃 Sprint' });
@@ -482,7 +494,14 @@ async function _showBugPreview(interaction, report, generateParams, tipo, ambien
           try {
             newReport = await generateBugReport({ ...generateParams, previousReport: report, adjustment });
           } catch (err) {
-            await interaction.editReply({ content: `❌ Error al ajustar el reporte: ${err.message}`, embeds: [], components: [] });
+            await sendErrorWithContext(interaction, {
+              errorMsg: `Error al ajustar el reporte: ${err.message}`,
+              tipo,
+              ambiente,
+              descripcion: generateParams.descripcion,
+              evidencia:   generateParams.evidencia ?? null,
+              taskId:      generateParams.taskId    ?? null,
+            });
             return resolve(null);
           }
 
@@ -516,6 +535,41 @@ async function resolveChannel(interaction) {
   return interaction.channel
     ?? interaction.client.channels.cache.get(interaction.channelId)
     ?? await interaction.client.channels.fetch(interaction.channelId).catch(() => null);
+}
+
+// ── Error with context embed ──────────────────────────────────────────────────
+async function sendErrorWithContext(interaction, { errorMsg, tipo, ambiente, descripcion, evidencia = null, taskId = null }) {
+  const embed = new EmbedBuilder()
+    .setColor(0xff0000)
+    .setTitle('📋 Tu contexto — cópialo para reintentar')
+    .addFields(
+      { name: '📌 Tipo',      value: tipo,     inline: true },
+      { name: '🌍 Ambiente',  value: ambiente, inline: true },
+    );
+
+  if (taskId)    embed.addFields({ name: '🔗 Task ID padre', value: `\`${taskId}\``, inline: false });
+  if (evidencia) embed.addFields({ name: '🔗 Evidencia',     value: evidencia,       inline: false });
+
+  // Split descripcion in chunks of 1020 to stay within Discord field limits
+  const CHUNK = 1020;
+  let remaining = descripcion ?? '';
+  let index = 0;
+  while (remaining.length > 0) {
+    embed.addFields({
+      name: index === 0 ? '📝 Descripción' : '📝 Descripción (cont.)',
+      value: remaining.slice(0, CHUNK),
+    });
+    remaining = remaining.slice(CHUNK);
+    index++;
+  }
+
+  embed.setFooter({ text: 'Copia la descripción y ejecuta /bug de nuevo para reintentar.' });
+
+  await interaction.editReply({
+    content: `❌ ${errorMsg}`,
+    embeds: [embed],
+    components: [],
+  });
 }
 
 // ── Embed helpers ─────────────────────────────────────────────────────────────

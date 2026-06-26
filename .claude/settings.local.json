@@ -4,7 +4,16 @@
       "mcp__claude_ai_ClickUp__clickup_get_workspace_hierarchy",
       "Bash(node -e \"const b = require\\('./src/commands/bug'\\); console.log\\('bug.js OK:', b.data.name\\); const c = require\\('./src/commands/conocimiento'\\); console.log\\('conocimiento.js OK:', c.data.name\\);\")",
       "Bash(node -e \"const b = require\\('./src/commands/bug'\\); console.log\\('OK:', b.data.name\\); const opts = b.data.options.map\\(o => o.name\\); console.log\\('Opciones:', opts\\);\")",
-      "WebFetch(domain:docs.anthropic.com)"
+      "WebFetch(domain:docs.anthropic.com)",
+      "Bash(Get-ChildItem -Recurse -Depth 3)",
+      "Bash(Select-Object FullName)",
+      "PowerShell(Get-ChildItem -Path \"C:\\\\Users\\\\hdave\\\\OneDrive\\\\Documentos\\\\Automation\\\\TOTS\\\\Bot_Discord_ClickUp\" -Recurse | Select-Object -ExpandProperty FullName | ForEach-Object { $_ -replace [regex]::Escape\\(\"C:\\\\Users\\\\hdave\\\\OneDrive\\\\Documentos\\\\Automation\\\\TOTS\\\\Bot_Discord_ClickUp\"\\), \"\" } | Sort-Object | Select-Object -First 80)",
+      "Bash(dir /s /b \"C:\\\\Users\\\\hdave\\\\OneDrive\\\\Documentos\\\\Automation\\\\TOTS\\\\Bot_Discord_ClickUp\")",
+      "mcp__b26c096f-0f2f-45b2-a4c3-4974720e91cd__clickup_get_custom_fields",
+      "mcp__b26c096f-0f2f-45b2-a4c3-4974720e91cd__clickup_get_workspace_hierarchy",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); [print\\(uid, '→', [ \\(e.get\\('tipo'\\), e.get\\('report',{}\\).get\\('title'\\)\\) for e in v]\\) for uid,v in d.items\\(\\)]\")",
+      "Bash(node -e ' *)",
+      "Bash(node -e 'const ai=require\\(\"./src/services/ai.js\"\\); console.log\\(\"Modulo OK. Exports:\", Object.keys\\(ai\\)\\);')"
     ]
   }
 }

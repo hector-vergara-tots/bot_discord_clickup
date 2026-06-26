@@ -30,7 +30,7 @@ const TC_RULES = `## Rules for every test case
 - Do NOT use bold or inline formatting inside steps — keep them plain
 - **description_es**: translate the \`description\` into Spanish. Keep Markdown structure, section headers, and UI labels (button names, field names, tab names) in English — only translate the prose and step instructions.
 - Adjustment requests may arrive in Spanish — apply them to \`description\` (English) and update \`description_es\` (Spanish) accordingly.
-- Escape newlines as \\n in each JSON string value so the output remains valid JSON`;
+- Use real line breaks inside each field value — do NOT write the literal characters \\n`;
 
 const systemPrompt = `You are a senior QA engineer. Your job is to take informal test case descriptions and turn them into professional, structured test case documents suitable for a project management tool.
 

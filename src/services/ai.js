@@ -37,31 +37,156 @@ if (AI_PROVIDER === 'gemini') {
 logger.info(`[ai] Provider: ${AI_PROVIDER}`);
 
 // ── Response parser (shared) ──────────────────────────────────────────────────
+
+/**
+ * Scans JSON character-by-character and repairs the two failure modes most
+ * common in AI-generated JSON:
+ *   1. Control characters (newlines, carriage returns, tabs) inside strings.
+ *   2. Unescaped double quotes inside string values — e.g. when the model
+ *      writes the "Apply for permit" button verbatim inside a description.
+ *
+ * For (2) it uses a lookahead heuristic: a `"` inside a string is treated as
+ * the closing quote only when the next non-whitespace character is a JSON
+ * structural token (: , } ]) or end-of-input; otherwise it is content and
+ * gets escaped. More reliable than regex for multi-line content.
+ */
+function repairJson(jsonStr) {
+  let result = '';
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < jsonStr.length; i++) {
+    const char = jsonStr[i];
+
+    if (escaped) {
+      result += char;
+      escaped = false;
+      continue;
+    }
+
+    if (char === '\\') {
+      escaped = true;
+      result += char;
+      continue;
+    }
+
+    if (char === '"') {
+      if (!inString) {
+        inString = true;
+        result += char;
+        continue;
+      }
+
+      // Inside a string: decide whether this quote closes it or is content.
+      let j = i + 1;
+      while (j < jsonStr.length && (jsonStr[j] === ' ' || jsonStr[j] === '\n' || jsonStr[j] === '\r' || jsonStr[j] === '\t')) {
+        j++;
+      }
+      const next = jsonStr[j];
+      const isClosing = next === undefined || next === ':' || next === ',' || next === '}' || next === ']';
+
+      if (isClosing) {
+        inString = false;
+        result += char;
+      } else {
+        result += '\\"'; // content quote — escape it
+      }
+      continue;
+    }
+
+    if (inString) {
+      if (char === '\n') { result += '\\n'; continue; }
+      if (char === '\r') { result += '\\r'; continue; }
+      if (char === '\t') { result += '\\t'; continue; }
+    }
+
+    result += char;
+  }
+
+  return result;
+}
+
+/**
+ * Safety net for native-JSON output (Claude tool-use / Gemini JSON mode):
+ * models sometimes write the literal characters \n / \t / \r into field values
+ * out of habit, even though the API already serializes the JSON. We only fix
+ * the unambiguous broken case — a string that has NO real line break but does
+ * contain a literal "\n" — so correctly-formatted multi-line content (which
+ * already has real breaks) and legitimate literal backslash-n are left alone.
+ */
+function unescapeLiteralWhitespace(value) {
+  if (typeof value === 'string') {
+    if (!value.includes('\n') && /\\[nrt]/.test(value)) {
+      return value.replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\t/g, '\t');
+    }
+    return value;
+  }
+  if (Array.isArray(value)) return value.map(unescapeLiteralWhitespace);
+  if (value && typeof value === 'object') {
+    for (const key of Object.keys(value)) {
+      value[key] = unescapeLiteralWhitespace(value[key]);
+    }
+    return value;
+  }
+  return value;
+}
+
 function parseAIResponse(rawText) {
+  // 1. Strip markdown code fences (```json ... ``` or ``` ... ```)
+  let cleaned = rawText.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+
+  // 2. Try direct parse
   try {
-    return JSON.parse(rawText);
-  } catch {
-    const jsonMatch = rawText.match(/\{[\s\S]*\}/);
-    if (jsonMatch) return JSON.parse(jsonMatch[0]);
-    throw new Error(`Non-JSON response: ${rawText.slice(0, 200)}`);
+    return JSON.parse(cleaned);
+  } catch {}
+
+  // 3. Extract first {...} block (handles leading/trailing text)
+  const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+  if (jsonMatch) {
+    try {
+      return JSON.parse(jsonMatch[0]);
+    } catch {}
+  }
+
+  // 4. Repair control characters and unescaped quotes inside JSON strings
+  const candidate = jsonMatch?.[0] ?? cleaned;
+  try {
+    return JSON.parse(repairJson(candidate));
+  } catch (err) {
+    logger.error(`[ai] JSON parse failed. Raw response (first 500 chars):\n${rawText.slice(0, 500)}`);
+    throw new Error(`Expected ',' or '}' after property value in JSON: ${err.message}`);
   }
 }
 
-// ── Low-level call: routes to active provider ─────────────────────────────────
-async function callAI(systemPrompt, userMessage) {
+// ── Low-level call: routes to active provider (plain text) ────────────────────
+async function callAI(systemPrompt, userMessage, maxTokens = 8192) {
   if (AI_PROVIDER === 'gemini') {
     return callGemini(systemPrompt, userMessage);
   }
-  return callClaude(systemPrompt, userMessage);
+  return callClaude(systemPrompt, userMessage, maxTokens);
 }
 
-async function callGemini(systemPrompt, userMessage) {
+// ── Structured-JSON call: returns a parsed object, never a raw string ─────────
+// Eliminates JSON.parse errors at the source:
+//   • Claude → tool-use; the SDK hands back an already-parsed object.
+//   • Gemini → native JSON output mode (responseMimeType), then parse (with
+//     repairJson as a safety net).
+async function callAIJson(systemPrompt, userMessage, maxTokens = 8192) {
+  if (AI_PROVIDER === 'gemini') {
+    const raw = await callGemini(systemPrompt, userMessage, true);
+    return unescapeLiteralWhitespace(parseAIResponse(raw));
+  }
+  return unescapeLiteralWhitespace(await callClaudeJson(systemPrompt, userMessage, maxTokens));
+}
+
+async function callGemini(systemPrompt, userMessage, jsonMode = false) {
   let lastError;
   for (const modelName of GEMINI_MODELS) {
     try {
       const model = geminiClient.getGenerativeModel({
         model: modelName,
         systemInstruction: systemPrompt,
+        ...(jsonMode ? { generationConfig: { responseMimeType: 'application/json' } } : {}),
       });
       const result = await model.generateContent(userMessage);
       return result.response.text().trim();
@@ -73,14 +198,38 @@ async function callGemini(systemPrompt, userMessage) {
   throw new Error(`All Gemini models failed. Last error: ${lastError.message}`);
 }
 
-async function callClaude(systemPrompt, userMessage) {
+async function callClaude(systemPrompt, userMessage, maxTokens = 8192) {
   const response = await claudeClient.messages.create({
     model: CLAUDE_MODEL,
-    max_tokens: 4096,
+    max_tokens: maxTokens,
     system: systemPrompt,
     messages: [{ role: 'user', content: userMessage }],
   });
   return response.content[0].text.trim();
+}
+
+// Forces Claude to emit its answer through a tool call. The SDK returns
+// tool_use.input as a native JS object, so we never parse model text — the
+// "Expected ',' or '}'" class of errors cannot occur here.
+async function callClaudeJson(systemPrompt, userMessage, maxTokens = 8192) {
+  const response = await claudeClient.messages.create({
+    model: CLAUDE_MODEL,
+    max_tokens: maxTokens,
+    system: systemPrompt,
+    messages: [{ role: 'user', content: userMessage }],
+    tools: [{
+      name: 'submit_report',
+      description: 'Submit the structured report. Provide every field exactly as specified in the system prompt.',
+      input_schema: { type: 'object' },
+    }],
+    tool_choice: { type: 'tool', name: 'submit_report' },
+  });
+
+  const toolUse = response.content.find((c) => c.type === 'tool_use');
+  if (!toolUse?.input) {
+    throw new Error('Claude did not return a structured tool response.');
+  }
+  return toolUse.input;
 }
 
 // ── generateBugReport ─────────────────────────────────────────────────────────
@@ -125,8 +274,7 @@ async function generateBugReport({
     adjustment     ? `\n## User Adjustment Request\n${adjustment}\n\nUpdate the report based on this feedback. Keep everything else intact.` : null,
   ].filter(Boolean).join('\n');
 
-  const rawText = await callAI(systemPrompt, userMessage);
-  return parseAIResponse(rawText);
+  return callAIJson(systemPrompt, userMessage);
 }
 
 // ── generateTestCases ─────────────────────────────────────────────────────────
@@ -145,8 +293,7 @@ async function generateTestCases({ huName, huDescription, ambiente, useContext =
     adjustment     ? `\n## User Adjustment Request\n${adjustment}\n\nUpdate the test cases based on this feedback. Keep everything else intact.` : null,
   ].filter(Boolean).join('\n');
 
-  const rawText = await callAI(systemPrompt, userMessage);
-  return parseAIResponse(rawText);
+  return callAIJson(systemPrompt, userMessage);
 }
 
 // ── extractLearnings ──────────────────────────────────────────────────────────

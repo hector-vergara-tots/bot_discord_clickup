@@ -5,6 +5,7 @@ const logger = require('./utils/logger');
 const bugCommand         = require('./commands/bug');
 const testcaseCommand    = require('./commands/testcase');
 const conocimientoCommand = require('./commands/conocimiento');
+const syncBugsCommand    = require('./commands/syncbugs');
 
 // ── Validate required env vars ──────────────────────────────────────────────
 const AI_PROVIDER = (process.env.AI_PROVIDER || 'gemini').toLowerCase();
@@ -47,6 +48,7 @@ client.commands = new Collection();
 client.commands.set(bugCommand.data.name, bugCommand);
 client.commands.set(testcaseCommand.data.name, testcaseCommand);
 client.commands.set(conocimientoCommand.data.name, conocimientoCommand);
+client.commands.set(syncBugsCommand.data.name, syncBugsCommand);
 
 // ── Register slash commands with Discord ─────────────────────────────────────
 async function registerCommands() {
@@ -77,7 +79,7 @@ async function registerCommands() {
 }
 
 // ── Event: ready ─────────────────────────────────────────────────────────────
-client.once('ready', async (c) => {
+client.once('clientReady', async (c) => {
   logger.info(`[bot] Logged in as ${c.user.tag}`);
   await registerCommands();
 });

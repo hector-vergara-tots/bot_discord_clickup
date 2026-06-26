@@ -68,6 +68,16 @@ const ENVIRONMENT_OPTIONS = {
 
 const ENVIRONMENT_FIELD_ID = '831a2fc4-e6c7-4aee-89a4-8f58dabfa28a';
 
+const SEVERITY_FIELD_ID = 'e84f184b-67b1-4c8b-85f6-fe3b66a256d2';
+const SEVERITY_OPTIONS = {
+  'Critical': 'b0ceb522-ce32-4a0c-85c5-d563c7318b0f',
+  'High':     '8844530d-a866-4ae6-b2b0-f05e225ce30f',
+  'Medium':   '6dea5cd3-53ec-4265-b094-d39522489bb3',
+  'Low':      'a8012547-ef16-4fd2-8ddc-142480655783',
+};
+
+const TARGET_VERSION_FIELD_ID = '904bdb5b-e453-4359-ae9f-31e90c8b5e0d';
+
 /**
  * Creates a task (or subtask) in ClickUp.
  * When parentTaskId is provided the task is created as a child of that task.
@@ -84,6 +94,24 @@ const ENVIRONMENT_FIELD_ID = '831a2fc4-e6c7-4aee-89a4-8f58dabfa28a';
 async function createSubtask({ parentTaskId = null, listId, tipo, ambiente, assigneeId, report }) {
   const description = report.description;
   const environmentOptionId = ENVIRONMENT_OPTIONS[ambiente.toLowerCase()];
+  const isBug = tipo.toLowerCase() === 'bug';
+
+  const customFields = [
+    { id: ENVIRONMENT_FIELD_ID, value: environmentOptionId },
+  ];
+
+  if (isBug) {
+    customFields.push({ id: SEVERITY_FIELD_ID, value: SEVERITY_OPTIONS[impactToSeverity(report.impact)] });
+
+    if (parentTaskId) {
+      const parentTask = await getTask(parentTaskId);
+      const targetVersionField = parentTask.custom_fields?.find(f => f.id === TARGET_VERSION_FIELD_ID);
+      const targetVersionValue = targetVersionField?.value;
+      if (targetVersionValue) {
+        customFields.push({ id: TARGET_VERSION_FIELD_ID, value: targetVersionValue });
+      }
+    }
+  }
 
   const payload = {
     name: report.title,
@@ -91,14 +119,10 @@ async function createSubtask({ parentTaskId = null, listId, tipo, ambiente, assi
     markdown_content: description,
     custom_item_id: TASK_TYPES[tipo.toLowerCase()] ?? 0,
     tags: [tipo],
-    priority: impactToPriority(report.impact),
-    custom_fields: [
-      {
-        id: ENVIRONMENT_FIELD_ID,
-        value: environmentOptionId,
-      },
-    ],
+    custom_fields: customFields,
   };
+
+  if (!isBug) payload.priority = impactToPriority(report.impact);
 
   if (parentTaskId) payload.parent = parentTaskId;
   if (assigneeId)   payload.assignees = [assigneeId];
@@ -185,6 +209,19 @@ function impactToPriority(impact) {
     case 'Medio': return 2;
     case 'Bajo':  return 3;
     default:      return 3;
+  }
+}
+
+/**
+ * Maps impact level to ClickUp Severity option name.
+ * Used for bugs — Severity reflects complexity/impact, not development speed.
+ */
+function impactToSeverity(impact) {
+  switch (impact) {
+    case 'Alto':  return 'High';
+    case 'Medio': return 'Medium';
+    case 'Bajo':  return 'Low';
+    default:      return 'Medium';
   }
 }
 
